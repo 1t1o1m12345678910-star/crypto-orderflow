@@ -23,6 +23,8 @@ export class MarketStore {
   lastAggressor: Aggressor | null = null;
   sessionStartedAt: number | null = null;
   tradesSeen = 0;
+  /** Applied diff-depth events. Zero means the bid/ask numbers are still the REST snapshot. */
+  depthDiffs = 0;
   statusKind: StatusKind = "loading";
   statusText = "準備連線";
   detail = "足跡、掛單熱圖與清算只會在連上公開行情之後出現。";
@@ -41,6 +43,7 @@ export class MarketStore {
     this.lastAggressor = null;
     this.sessionStartedAt = null;
     this.tradesSeen = 0;
+    this.depthDiffs = 0;
     this.bestBid = null;
     this.bestAsk = null;
     this.continuityWarning = "";

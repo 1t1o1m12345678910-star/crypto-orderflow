@@ -1,37 +1,46 @@
 import { tickToPrice } from "../market/price";
-import { parseAggTrade, aggressorFromBuyerMaker } from "../market/aggressor";
+import { aggressorFromBuyerMaker } from "../market/aggressor";
 import { parseKlines } from "../market/candles";
-import { parseForceOrder, pushLiquidation } from "../market/liquidations";
+import { pushLiquidation } from "../market/liquidations";
 import type { Timeframe } from "../market/time";
 import type { MarketStore, SymbolId } from "../store";
+import { DEPTH_FRESH_MS, TRADE_FRESH_MS, describeFeed, shouldReconnectSilentSocket } from "./channelHealth";
 import {
   FAPI_ORIGIN,
   MarketDataError,
+  decodeSocketData,
   fetchMarketJson,
-  parseDepthDiff,
+  marketStreamUrl,
   parseDepthSnapshot,
   parseTickSize,
-  streamUrl,
-  unwrapStream,
+  publicStreamUrl,
+  routeStreamMessage,
 } from "./binance";
-
-const STALE_MS = 12_000;
 
 type Phase = "boot" | "live" | "gap" | "reconnecting" | "stale" | "failed" | "offline";
 
 export class LiveSession {
   private generation = 0;
-  private bindId = 0;
+  private marketBind = 0;
+  private publicBind = 0;
   private snapSeq = 0;
   private attempt = 0;
   private phase: Phase = "boot";
   private stopped = true;
-  private socket: WebSocket | null = null;
+  private marketSocket: WebSocket | null = null;
+  private publicSocket: WebSocket | null = null;
   private abort: AbortController | null = null;
-  private lastMessageAt = 0;
+  private marketOpen = false;
+  private publicOpen = false;
+  private marketOpenedAt: number | null = null;
+  private publicOpenedAt: number | null = null;
+  private lastTradeAt: number | null = null;
+  private lastDepthAt: number | null = null;
   private hiddenAt = 0;
-  private uncoveredFrom: number | null = null;
+  private marketReconnectAt = 0;
+  private publicReconnectAt = 0;
   private snapshotTimer = 0;
+  private publicReconnectTimer = 0;
   private staleTimer = 0;
   private heatTimer = 0;
   private reconnectTimer = 0;
@@ -75,9 +84,12 @@ export class LiveSession {
   private stopNetwork(): void {
     window.clearTimeout(this.snapshotTimer);
     window.clearTimeout(this.reconnectTimer);
+    window.clearTimeout(this.publicReconnectTimer);
     window.clearInterval(this.staleTimer);
     window.clearInterval(this.heatTimer);
-    this.detachSocket();
+    this.staleTimer = 0;
+    this.heatTimer = 0;
+    this.detachSockets();
     this.abort?.abort();
     this.abort = null;
   }
@@ -99,6 +111,10 @@ export class LiveSession {
       const tick = parseTickSize(info, this.store.symbol);
       if (tick === null) throw new MarketDataError("http", "回應裡沒有這個合約的 tickSize。");
       this.store.resetMarket(tick);
+      this.lastTradeAt = null;
+      this.lastDepthAt = null;
+      this.marketOpen = false;
+      this.publicOpen = false;
       this.write(
         "loading",
         "正在讀取 K 線",
@@ -106,7 +122,8 @@ export class LiveSession {
       );
       await this.refreshCandles(generation);
       if (!this.alive(generation)) return;
-      this.openSocket(generation);
+      this.openMarket(generation);
+      this.openPublic(generation);
     } catch (error) {
       if (!this.alive(generation)) return;
       this.fail(error);
@@ -130,91 +147,124 @@ export class LiveSession {
     }
   }
 
-  private openSocket(generation: number): void {
+  private openMarket(generation: number): void {
     if (!this.alive(generation)) return;
-    this.detachSocket();
-    const bindId = ++this.bindId;
+    this.detachMarket();
+    const bindId = ++this.marketBind;
     let socket: WebSocket;
     try {
-      socket = new WebSocket(streamUrl(this.store.symbol));
+      socket = new WebSocket(marketStreamUrl(this.store.symbol));
     } catch {
-      this.fail(new MarketDataError("network", "無法建立 WebSocket。"));
+      this.fail(new MarketDataError("network", "無法建立逐筆 WebSocket。"));
       return;
     }
-    this.socket = socket;
-    this.write("loading", "正在訂閱行情", "訂閱 aggTrade、depth@100ms 與 forceOrder。連上之後才開始累積足跡與熱圖。");
+    this.marketSocket = socket;
     socket.onopen = () => {
-      if (bindId !== this.bindId || !this.alive(generation)) return;
+      if (bindId !== this.marketBind || !this.alive(generation)) return;
+      this.marketOpen = true;
+      this.marketOpenedAt = Date.now();
       this.attempt = 0;
       if (this.store.sessionStartedAt === null) this.store.sessionStartedAt = Date.now();
-      if (this.uncoveredFrom !== null) {
-        this.store.footprint.noteGap(this.uncoveredFrom, Date.now());
-        this.uncoveredFrom = null;
-      }
-      this.lastMessageAt = Date.now();
-      this.store.book.reconnect();
       this.armTimers(generation);
-      void this.pullSnapshot(generation);
+      this.publishHealth();
     };
     socket.onmessage = (event) => {
-      if (bindId !== this.bindId || !this.alive(generation)) return;
-      this.lastMessageAt = Date.now();
-      this.consume(generation, event.data);
-      if ((this.phase === "stale" || this.phase === "offline") && this.store.book.synced) {
-        this.phase = "live";
-        this.writePhase();
-      }
-      this.onChange();
+      if (bindId !== this.marketBind || !this.alive(generation)) return;
+      void this.ingest(generation, "market", event.data);
     };
     socket.onerror = () => {
       /* close carries the reconnect */
     };
     socket.onclose = () => {
-      if (bindId !== this.bindId || !this.alive(generation)) return;
-      this.store.book.reconnect();
-      if (this.uncoveredFrom === null) this.uncoveredFrom = this.lastMessageAt || Date.now();
-      window.clearInterval(this.heatTimer);
-      this.scheduleReconnect(generation);
-      this.onChange();
+      if (bindId !== this.marketBind || !this.alive(generation)) return;
+      this.marketOpen = false;
+      if (this.lastTradeAt !== null) this.store.footprint.noteGap(this.lastTradeAt, Date.now());
+      this.scheduleMarketReconnect(generation);
+      this.publishHealth();
     };
   }
 
-  private consume(generation: number, raw: unknown): void {
-    let payload: unknown = raw;
-    if (typeof raw === "string") {
-      try {
-        payload = JSON.parse(raw) as unknown;
-      } catch {
-        return;
-      }
+  private openPublic(generation: number): void {
+    if (!this.alive(generation)) return;
+    this.detachPublic();
+    const bindId = ++this.publicBind;
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(publicStreamUrl(this.store.symbol));
+    } catch {
+      this.fail(new MarketDataError("network", "無法建立深度 WebSocket。"));
+      return;
     }
-    const data = unwrapStream(payload);
-    const trade = parseAggTrade(data);
-    if (trade && trade.symbol === this.store.symbol) {
-      this.store.footprint.addTrade(trade);
-      this.store.lastPrice = trade.price;
-      this.store.lastAggressor = aggressorFromBuyerMaker(trade.buyerIsMaker);
+    this.publicSocket = socket;
+    socket.onopen = () => {
+      if (bindId !== this.publicBind || !this.alive(generation)) return;
+      this.publicOpen = true;
+      this.publicOpenedAt = Date.now();
+      this.store.book.reconnect();
+      this.armTimers(generation);
+      void this.pullSnapshot(generation);
+      this.publishHealth();
+    };
+    socket.onmessage = (event) => {
+      if (bindId !== this.publicBind || !this.alive(generation)) return;
+      void this.ingest(generation, "public", event.data);
+    };
+    socket.onerror = () => {
+      /* close carries the reconnect */
+    };
+    socket.onclose = () => {
+      if (bindId !== this.publicBind || !this.alive(generation)) return;
+      this.publicOpen = false;
+      this.store.book.reconnect();
+      this.schedulePublicReconnect(generation);
+      this.publishHealth();
+    };
+  }
+
+  private async ingest(generation: number, source: "market" | "public", raw: unknown): Promise<void> {
+    let payload: unknown;
+    try {
+      payload = await decodeSocketData(raw);
+    } catch {
+      return;
+    }
+    if (!this.alive(generation)) return;
+    const routed = routeStreamMessage(payload, this.store.symbol);
+    if (routed.kind === "aggTrade") {
+      if (source !== "market") return;
+      this.lastTradeAt = Date.now();
+      this.store.footprint.addTrade(routed.trade);
+      this.store.lastPrice = routed.trade.price;
+      this.store.lastAggressor = aggressorFromBuyerMaker(routed.trade.buyerIsMaker);
       this.store.tradesSeen += 1;
+      this.publishHealth();
+      this.onChange();
       return;
     }
-    const liquidation = parseForceOrder(data, this.store.symbol);
-    if (liquidation) {
-      pushLiquidation(this.store.liquidations, liquidation);
+    if (routed.kind === "liquidation") {
+      if (source !== "market") return;
+      pushLiquidation(this.store.liquidations, routed.liquidation);
+      this.onChange();
       return;
     }
-    const diff = parseDepthDiff(data);
-    if (!diff) return;
-    const result = this.store.book.onDiff(diff);
+    if (routed.kind !== "depth" || source !== "public") return;
+    const result = this.store.book.onDiff(routed.diff);
+    this.lastDepthAt = Date.now();
+    this.store.depthDiffs += 1;
     this.syncBbo();
     if (result.type === "gap") {
       this.phase = "gap";
       this.write(
         "warn",
         "深度序號中斷",
-        "後續深度事件的 pu 必須等於上一筆的 u。這本訂單簿已停下，正在重新抓快照。熱圖暫停取樣，不會用舊檔位冒充新資料。",
+        "後續深度事件的 pu 必須等於上一筆的 u。這本訂單簿已停下，正在重新抓快照。熱圖暫停取樣。逐筆若還在，不會被這次重抓清掉。",
       );
       this.scheduleSnapshot(generation, 700);
+      return;
     }
+    if (this.phase === "gap" && this.store.book.synced) this.phase = "boot";
+    this.publishHealth();
+    this.onChange();
   }
 
   private async pullSnapshot(generation: number): Promise<void> {
@@ -242,9 +292,9 @@ export class LiveSession {
           "第一筆深度沒有蓋到快照的 lastUpdateId，也沒有用 pu 接上。正在重新抓取，這段時間不畫新的熱圖。",
         );
         this.scheduleSnapshot(generation, 800);
-      } else if (this.socket?.readyState === WebSocket.OPEN) {
-        this.phase = "live";
-        this.writePhase();
+      } else if (this.publicOpen) {
+        this.phase = "boot";
+        this.publishHealth();
       }
       this.onChange();
     } catch (error) {
@@ -266,33 +316,35 @@ export class LiveSession {
     }, delay);
   }
 
-  private scheduleReconnect(generation: number): void {
+  private scheduleMarketReconnect(generation: number): void {
     this.attempt += 1;
     const delay = Math.min(20_000, 1_000 * 2 ** Math.min(this.attempt - 1, 4));
-    this.phase = "reconnecting";
-    this.write(
-      "warn",
-      "連線中斷",
-      `與 fstream.binance.com 的連線已中斷，${Math.round(delay / 1000)} 秒後重試（第 ${this.attempt} 次）。中斷期間的逐筆沒有收到，CVD 不會用 0 補洞，也不會重新從零起算。`,
-    );
     window.clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = window.setTimeout(() => this.openSocket(generation), delay);
+    this.reconnectTimer = window.setTimeout(() => this.openMarket(generation), delay);
+  }
+
+  private schedulePublicReconnect(generation: number): void {
+    const delay = Math.min(20_000, 1_000 * 2 ** Math.min(this.attempt, 4));
+    window.clearTimeout(this.publicReconnectTimer);
+    this.publicReconnectTimer = window.setTimeout(() => this.openPublic(generation), delay);
   }
 
   private armTimers(generation: number): void {
     window.clearInterval(this.staleTimer);
     window.clearInterval(this.heatTimer);
     this.staleTimer = window.setInterval(() => {
-      if (!this.alive(generation) || this.phase === "failed" || this.phase === "reconnecting") return;
-      if (Date.now() - this.lastMessageAt > STALE_MS && this.phase === "live") {
-        this.phase = "stale";
-        this.write(
-          "warn",
-          "行情延遲",
-          "已超過 12 秒沒有新的行情訊息。畫面保留最後一次收到的真實資料，沒有用模擬值填補。",
-        );
-        this.onChange();
+      if (!this.alive(generation) || this.phase === "failed" || this.phase === "offline") return;
+      const now = Date.now();
+      const health = describeFeed(this.feedSnapshot(now));
+      if (shouldReconnectSilentSocket(this.marketOpen, health.trades) && now >= this.marketReconnectAt) {
+        this.marketReconnectAt = now + TRADE_FRESH_MS;
+        this.openMarket(generation);
       }
+      if (shouldReconnectSilentSocket(this.publicOpen, health.depth) && now >= this.publicReconnectAt) {
+        this.publicReconnectAt = now + DEPTH_FRESH_MS;
+        this.openPublic(generation);
+      }
+      if (this.phase !== "gap") this.publishHealth(now);
     }, 2_000);
     this.heatTimer = window.setInterval(() => {
       if (!this.alive(generation)) return;
@@ -307,14 +359,32 @@ export class LiveSession {
     this.store.bestAsk = ask === null ? null : tickToPrice(ask, this.store.tickSize);
   }
 
-  private writePhase(): void {
-    if (this.phase === "live") {
-      this.write(
-        "ok",
-        "即時",
-        "訂單簿已對齊。足跡與熱圖從這次連線開始累積。左側灰蠟燭若存在，只是交易所 K 線，沒有逐筆。",
-      );
+  private feedSnapshot(now: number) {
+    return {
+      now,
+      marketOpen: this.marketOpen,
+      publicOpen: this.publicOpen,
+      marketOpenedAt: this.marketOpenedAt,
+      publicOpenedAt: this.publicOpenedAt,
+      bookSynced: this.store.book.synced,
+      lastTradeAt: this.lastTradeAt,
+      lastDepthAt: this.lastDepthAt,
+      tradeCount: this.store.tradesSeen,
+      liquidationCount: this.store.liquidations.length,
+    };
+  }
+
+  private publishHealth(now = Date.now()): void {
+    if (this.phase === "gap" || this.phase === "failed" || this.phase === "offline") return;
+    const status = describeFeed(this.feedSnapshot(now));
+    if (
+      status.kind === this.store.statusKind &&
+      status.title === this.store.statusText &&
+      status.detail === this.store.detail
+    ) {
+      return;
     }
+    this.write(status.kind, status.title, status.detail);
   }
 
   private fail(error: unknown): void {
@@ -348,10 +418,24 @@ export class LiveSession {
     this.onChange();
   }
 
-  private detachSocket(): void {
-    const socket = this.socket;
-    this.socket = null;
-    this.bindId += 1;
+  private detachSockets(): void {
+    this.detachMarket();
+    this.detachPublic();
+  }
+
+  private detachMarket(): void {
+    this.detach(this.marketSocket);
+    this.marketSocket = null;
+    this.marketOpen = false;
+  }
+
+  private detachPublic(): void {
+    this.detach(this.publicSocket);
+    this.publicSocket = null;
+    this.publicOpen = false;
+  }
+
+  private detach(socket: WebSocket | null): void {
     if (!socket) return;
     socket.onopen = null;
     socket.onmessage = null;
@@ -369,7 +453,8 @@ export class LiveSession {
     const started = this.hiddenAt;
     const away = Date.now() - started;
     this.hiddenAt = 0;
-    if (away < 8_000 || this.socket?.readyState !== WebSocket.OPEN) return;
+    if (away < 8_000) return;
+    if (!this.marketOpen && !this.publicOpen) return;
     this.store.continuityWarning =
       "分頁在背景時可能漏掉逐筆。CVD 只累計實際收到的成交，不會把缺口補成 0，也不會重新從零起算。";
     this.store.footprint.noteGap(started, Date.now());
@@ -387,6 +472,8 @@ export class LiveSession {
   private readonly onOnline = (): void => {
     if (this.stopped || this.store.mode !== "live" || this.phase === "failed") return;
     this.attempt = 0;
-    this.openSocket(this.generation);
+    this.phase = "boot";
+    this.openMarket(this.generation);
+    this.openPublic(this.generation);
   };
 }

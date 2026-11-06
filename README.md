@@ -32,7 +32,8 @@ Bars follow Unix epoch boundaries, the same alignment Binance uses. Axis labels 
 | Use | URL |
 | --- | --- |
 | Exchange info, klines, depth snapshot | `https://fapi.binance.com` |
-| `aggTrade`, `depth@100ms`, `forceOrder` | `wss://fstream.binance.com/stream` |
+| `depth@100ms` | `wss://fstream.binance.com/public/stream` |
+| `aggTrade`, `forceOrder` | `wss://fstream.binance.com/market/stream` |
 
 Spot hosts (`api.binance.com`, `stream.binance.com`) are not used.
 
