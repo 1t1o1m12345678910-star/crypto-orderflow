@@ -101,9 +101,15 @@ h1 { font-size: 1.35rem; line-height: 1.1; margin: 0; letter-spacing: 0.01em; }
 
 .hud {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+}
+.cvd-note {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 .hud div {
   background: var(--bg-raise);
@@ -197,7 +203,7 @@ footer { color: var(--muted); font-size: 0.82rem; line-height: 1.5; padding-bott
 footer code { color: #d5e4f2; }
 
 @media (max-width: 900px) {
-  .hud { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .hud { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .top { flex-direction: column; }
   .controls { justify-content: flex-start; }
   .chart-wrap { height: min(68dvh, 720px); min-height: 360px; }

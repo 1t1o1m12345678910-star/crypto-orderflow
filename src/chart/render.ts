@@ -1,12 +1,14 @@
 import type { Aggressor } from "../market/aggressor";
 import type { Candle } from "../market/candles";
+import type { CvdSnapshot } from "../market/cvd";
+import { cvdInView, cvdSegments } from "../market/cvd";
 import type { FootprintBar } from "../market/footprint";
 import type { HeatColumn } from "../market/heatmap";
 import { sumQty } from "../market/heatmap";
 import type { Liquidation } from "../market/liquidations";
 import { priceToTick, tickToPrice } from "../market/price";
 import { timeframeMs, type Timeframe } from "../market/time";
-import { formatClock, formatPrice } from "../format";
+import { formatClock, formatDelta, formatPrice } from "../format";
 import { priceToY, timeToX, type Rect } from "./scales";
 
 export interface ChartLayers {
@@ -15,6 +17,7 @@ export interface ChartLayers {
   liquidations: boolean;
   volume: boolean;
   candles: boolean;
+  cvd: boolean;
 }
 
 export interface ChartModel {
@@ -27,6 +30,7 @@ export interface ChartModel {
   priceShift: number;
   candles: Candle[];
   bars: FootprintBar[];
+  cvd: CvdSnapshot;
   heat: HeatColumn[];
   liquidations: Liquidation[];
   layers: ChartLayers;
@@ -39,6 +43,7 @@ export interface ChartModel {
 
 export interface ChartLayout {
   plot: Rect;
+  flow: Rect | null;
   volume: Rect | null;
   width: number;
   height: number;
@@ -63,18 +68,20 @@ export class ChartRenderer {
     ctx.fillStyle = "#0c1218";
     ctx.fillRect(0, 0, width, height);
 
-    const volumeHeight = model.layers.volume ? Math.max(64, Math.min(96, height * 0.16)) : 0;
+    const volumeHeight = model.layers.volume ? Math.max(56, Math.min(84, height * 0.14)) : 0;
+    const flowHeight = model.layers.cvd ? Math.max(64, Math.min(84, height * 0.15)) : 0;
     const plot: Rect = {
       x: 10,
       y: 12,
       w: Math.max(10, width - 84),
-      h: Math.max(10, height - 36 - volumeHeight - (volumeHeight ? 10 : 0)),
+      h: Math.max(10, height - 36 - volumeHeight - flowHeight - (volumeHeight ? 8 : 0) - (flowHeight ? 8 : 0)),
     };
-    const volume: Rect | null = volumeHeight
-      ? { x: plot.x, y: plot.y + plot.h + 8, w: plot.w, h: volumeHeight - 8 }
-      : null;
+    let cursorY = plot.y + plot.h + 6;
+    const flow: Rect | null = flowHeight ? { x: plot.x, y: cursorY, w: plot.w, h: flowHeight - 6 } : null;
+    if (flow) cursorY += flowHeight;
+    const volume: Rect | null = volumeHeight ? { x: plot.x, y: cursorY, w: plot.w, h: volumeHeight - 8 } : null;
     const range = priceRange(model);
-    const layout: ChartLayout = { plot, volume, width, height, priceMin: range.min, priceMax: range.max };
+    const layout: ChartLayout = { plot, flow, volume, width, height, priceMin: range.min, priceMax: range.max };
 
     this.drawPlotBackground(ctx, plot);
     if (model.layers.heatmap) this.drawHeat(ctx, model, layout);
@@ -85,6 +92,7 @@ export class ChartRenderer {
     this.drawLastPrice(ctx, model, layout);
     if (model.mode === "demo") this.drawWatermark(ctx, plot);
     this.drawAxes(ctx, model, layout);
+    if (flow && model.layers.cvd) this.drawFlow(ctx, model, layout, flow);
     if (volume && model.layers.volume) this.drawVolume(ctx, model, layout, volume);
     if (model.hover) this.drawCrosshair(ctx, model, layout);
     if (model.bars.length === 0 && model.candles.length === 0) {
@@ -282,23 +290,22 @@ export class ChartRenderer {
         const total = cell.buy + cell.sell;
         if (total <= 0) continue;
         const top = y - cellH / 2;
-        if (cellH >= 2 && bodyWidth >= 2) {
-          const buyShare = cell.buy / total;
-          ctx.fillStyle = "rgba(78, 161, 255, 0.34)";
-          ctx.fillRect(x - bodyWidth / 2, top, bodyWidth * buyShare, Math.max(1, cellH - 1));
-          ctx.fillStyle = "rgba(255, 176, 32, 0.36)";
-          ctx.fillRect(x - bodyWidth / 2 + bodyWidth * buyShare, top, bodyWidth * (1 - buyShare), Math.max(1, cellH - 1));
+        const left = x - bodyWidth / 2;
+        const half = bodyWidth / 2;
+        if (cellH >= 2 && bodyWidth >= 4) {
+          const sellTone = Math.min(0.85, 0.22 + cell.sell / total);
+          const buyTone = Math.min(0.85, 0.22 + cell.buy / total);
+          ctx.fillStyle = `rgba(255, 176, 32, ${sellTone})`;
+          ctx.fillRect(left, top, half - 0.5, Math.max(1, cellH - 1));
+          ctx.fillStyle = `rgba(78, 161, 255, ${buyTone})`;
+          ctx.fillRect(left + half, top, half - 0.5, Math.max(1, cellH - 1));
         }
-        if (cellH >= 22 && bodyWidth >= 48) {
-          ctx.font = `11px ${MONO}`;
-          ctx.fillStyle = "#d7ebff";
-          ctx.fillText(compactQty(cell.buy), x, y - cellH * 0.22);
+        if (cellH >= 13 && half >= 18) {
+          ctx.font = `${cellH >= 18 ? 11 : 10}px ${MONO}`;
           ctx.fillStyle = "#ffe1ad";
-          ctx.fillText(compactQty(cell.sell), x, y + cellH * 0.22);
-        } else if (cellH >= 13 && bodyWidth >= 32) {
-          ctx.font = `10px ${MONO}`;
-          ctx.fillStyle = cell.buy >= cell.sell ? "#d7ebff" : "#ffe1ad";
-          ctx.fillText(compactQty(cell.buy - cell.sell), x, y);
+          ctx.fillText(compactQty(cell.sell), left + half / 2, y);
+          ctx.fillStyle = "#d7ebff";
+          ctx.fillText(compactQty(cell.buy), left + half + half / 2, y);
         }
       }
     }
@@ -404,6 +411,99 @@ export class ChartRenderer {
     ctx.fillText("USDT", width - 78, 2);
   }
 
+  private drawFlow(ctx: CanvasRenderingContext2D, model: ChartModel, layout: ChartLayout, flow: Rect): void {
+    ctx.fillStyle = "#0d141c";
+    ctx.fillRect(flow.x, flow.y, flow.w, flow.h);
+    const slot = timeframeMs(model.timeframe);
+    const viewFrom = model.right - model.span;
+    const visible = cvdInView(model.cvd, viewFrom, model.right + slot);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(flow.x, flow.y, flow.w, flow.h);
+    ctx.clip();
+    const midY = flow.y + flow.h * 0.62;
+    ctx.strokeStyle = "rgba(148, 168, 188, 0.35)";
+    ctx.beginPath();
+    ctx.moveTo(flow.x, midY);
+    ctx.lineTo(flow.x + flow.w, midY);
+    ctx.stroke();
+    let maxAbs = 1e-6;
+    for (const point of visible) maxAbs = Math.max(maxAbs, Math.abs(point.delta));
+    const deltaAmp = (flow.h * 0.28) / maxAbs;
+    for (const point of visible) {
+      const x0 = timeToX(point.openTime, model.right, model.span, layout.plot);
+      const width = Math.max(1, (timeToX(point.openTime + slot, model.right, model.span, layout.plot) - x0) * 0.7);
+      const height = point.delta * deltaAmp;
+      ctx.fillStyle = point.delta >= 0 ? "rgba(78, 161, 255, 0.85)" : "rgba(255, 176, 32, 0.9)";
+      ctx.fillRect(x0, height >= 0 ? midY - height : midY, width, Math.max(1, Math.abs(height)));
+    }
+    if (visible.length > 0) {
+      let minCvd = Infinity;
+      let maxCvd = -Infinity;
+      for (const point of visible) {
+        minCvd = Math.min(minCvd, point.cvd);
+        maxCvd = Math.max(maxCvd, point.cvd);
+      }
+      if (minCvd === maxCvd) {
+        minCvd -= 1;
+        maxCvd += 1;
+      }
+      const pad = (maxCvd - minCvd) * 0.12;
+      minCvd -= pad;
+      maxCvd += pad;
+      const yOf = (value: number) => flow.y + 12 + ((maxCvd - value) / (maxCvd - minCvd)) * (flow.h - 18);
+      if (minCvd < 0 && maxCvd > 0) {
+        ctx.strokeStyle = "rgba(240, 212, 138, 0.35)";
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(flow.x, yOf(0));
+        ctx.lineTo(flow.x + flow.w, yOf(0));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.strokeStyle = "#f0d48a";
+      ctx.lineWidth = 1.6;
+      for (const segment of cvdSegments(visible, model.cvd.gaps)) {
+        ctx.beginPath();
+        segment.forEach((point, index) => {
+          const x = timeToX(point.openTime + slot / 2, model.right, model.span, layout.plot);
+          const y = yOf(point.cvd);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+      const last = visible[visible.length - 1];
+      ctx.fillStyle = last.cvd >= 0 ? "#d7ebff" : "#ffe1ad";
+      ctx.font = `11px ${MONO}`;
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(formatDelta(last.cvd), flow.x + flow.w - 4, yOf(last.cvd));
+    }
+    if (model.cvd.firstTradeTime !== null) {
+      const x = timeToX(model.cvd.firstTradeTime, model.right, model.span, layout.plot);
+      if (x >= flow.x && x <= flow.x + flow.w) {
+        ctx.fillStyle = "#f0d48a";
+        ctx.fillRect(x - 1, flow.y + 2, 2, 8);
+      }
+    }
+    for (const gap of model.cvd.gaps) {
+      const x0 = timeToX(gap.from, model.right, model.span, layout.plot);
+      const x1 = timeToX(gap.to, model.right, model.span, layout.plot);
+      const left = Math.max(flow.x, Math.min(x0, x1));
+      const right = Math.min(flow.x + flow.w, Math.max(x0, x1));
+      if (right - left < 1) continue;
+      ctx.fillStyle = "rgba(255, 176, 138, 0.16)";
+      ctx.fillRect(left, flow.y, right - left, flow.h);
+    }
+    ctx.restore();
+    ctx.fillStyle = "#8ea3b8";
+    ctx.font = `11px ${SANS}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("Delta 柱 · CVD 線", flow.x + 4, flow.y + 2);
+  }
+
   private drawVolume(
     ctx: CanvasRenderingContext2D,
     model: ChartModel,
@@ -490,13 +590,21 @@ export interface HoverInfo {
   liquidation: Liquidation | null;
   bidQty: number;
   askQty: number;
+  delta: number | null;
+  cvd: number | null;
+  cvdGap: boolean;
 }
 
 export function hoverInfo(model: ChartModel, layout: ChartLayout, x: number, y: number): HoverInfo | null {
   const { plot } = layout;
-  if (x < plot.x || x > plot.x + plot.w || y < plot.y || y > plot.y + plot.h) return null;
+  const inPlot = x >= plot.x && x <= plot.x + plot.w && y >= plot.y && y <= plot.y + plot.h;
+  const flow = layout.flow;
+  const inFlow = flow !== null && x >= flow.x && x <= flow.x + flow.w && y >= flow.y && y <= flow.y + flow.h;
+  if (!inPlot && !inFlow) return null;
   const time = model.right - model.span + ((x - plot.x) / plot.w) * model.span;
-  const price = layout.priceMax - ((y - plot.y) / plot.h) * (layout.priceMax - layout.priceMin);
+  const price = inPlot
+    ? layout.priceMax - ((y - plot.y) / plot.h) * (layout.priceMax - layout.priceMin)
+    : (model.lastPrice ?? layout.priceMax);
   const slot = timeframeMs(model.timeframe);
   const openTime = Math.floor(time / slot) * slot;
   const bar = model.bars.find((item) => item.openTime === openTime) ?? null;
@@ -516,6 +624,8 @@ export function hoverInfo(model: ChartModel, layout: ChartLayout, x: number, y: 
   const column = nearestColumn(model.heat, time);
   const bidQty = column ? sumQty(column.bids, tick - 1, tick + 1) : 0;
   const askQty = column ? sumQty(column.asks, tick - 1, tick + 1) : 0;
+  const cvdPoint = model.cvd.points.find((point) => point.openTime === openTime) ?? null;
+  const cvdGap = model.cvd.gaps.some((gap) => gap.from < openTime + slot && gap.to > openTime);
   return {
     time,
     price,
@@ -525,6 +635,9 @@ export function hoverInfo(model: ChartModel, layout: ChartLayout, x: number, y: 
     liquidation,
     bidQty,
     askQty,
+    delta: cvdPoint ? cvdPoint.delta : bar ? bar.buy - bar.sell : null,
+    cvd: cvdPoint ? cvdPoint.cvd : null,
+    cvdGap,
   };
 }
 
