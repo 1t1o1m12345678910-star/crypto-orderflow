@@ -77,7 +77,7 @@ app.innerHTML = `
   </section>
   <section class="hud" aria-label="目前數值">
     <div><span>最新價 USDT</span><b id="hud-price">—</b></div>
-    <div><span>買一 / 賣一</span><b id="hud-bbo">—</b></div>
+    <div><span id="hud-bbo-label">買一 / 賣一</span><b id="hud-bbo">—</b></div>
     <div><span>當根 Delta</span><b id="hud-delta">—</b></div>
     <div><span id="hud-cvd-label">CVD 累計</span><b id="hud-cvd">—</b></div>
     <div><span>已觀察逐筆</span><b id="hud-trades">0</b></div>
@@ -239,6 +239,9 @@ function syncMode(): void {
 function bannerText(): string {
   const warning = store.continuityWarning ? ` ${store.continuityWarning}` : "";
   if (store.mode === "demo") return `示範資料：合成成交、掛單與清算，不是幣安即時行情。${warning}`;
+  if (store.tradesSeen === 0) {
+    return `還沒有逐筆。灰蠟燭是交易所 K 線，買一賣一是掛單，都不是最新成交。${warning}`;
+  }
   if (store.sessionStartedAt === null) {
     return `尚未開始累積逐筆。若出現空心蠟燭，那只是交易所 K 線，沒有足跡與熱圖。${warning}`;
   }
@@ -266,6 +269,8 @@ function paintChrome(now: number): void {
     price.textContent = store.lastPrice === null ? "—" : formatPrice(store.lastPrice, store.tickSize);
     price.className = store.lastAggressor === "sell" ? "sell" : store.lastAggressor === "buy" ? "buy" : "";
   }
+  const bboLabel = document.querySelector<HTMLElement>("#hud-bbo-label");
+  if (bboLabel) bboLabel.textContent = store.depthDiffs > 0 ? "買一 / 賣一" : "買一 / 賣一（快照）";
   if (bbo) {
     const bid = store.bestBid === null ? "—" : formatPrice(store.bestBid, store.tickSize);
     const ask = store.bestAsk === null ? "—" : formatPrice(store.bestAsk, store.tickSize);

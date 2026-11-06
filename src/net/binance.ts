@@ -1,9 +1,13 @@
 import type { DepthDiff } from "../market/depthBook";
+import { parseAggTrade, type AggTrade } from "../market/aggressor";
+import { parseForceOrder, type Liquidation } from "../market/liquidations";
 
 /** USD-M futures REST. Spot is api.binance.com and is intentionally unused. */
 export const FAPI_ORIGIN = "https://fapi.binance.com";
-/** USD-M futures public market streams. Spot is stream.binance.com. */
-export const FSTREAM_ORIGIN = "wss://fstream.binance.com/stream";
+/** High-frequency public streams. Depth lives here, not on the legacy unrouted URL. */
+export const PUBLIC_STREAM_ORIGIN = "wss://fstream.binance.com/public/stream";
+/** Regular market streams. aggTrade and forceOrder are not delivered on /public. */
+export const MARKET_STREAM_ORIGIN = "wss://fstream.binance.com/market/stream";
 
 export class MarketDataError extends Error {
   readonly kind: "region" | "network" | "http";
@@ -15,10 +19,15 @@ export class MarketDataError extends Error {
   }
 }
 
-export function streamUrl(symbol: string): string {
+/** @depth@100ms is a public stream and must not share a socket with market streams. */
+export function publicStreamUrl(symbol: string): string {
+  return `${PUBLIC_STREAM_ORIGIN}?streams=${symbol.toLowerCase()}@depth@100ms`;
+}
+
+/** aggTrade and forceOrder are market streams. The legacy /stream URL no longer pushes them. */
+export function marketStreamUrl(symbol: string): string {
   const id = symbol.toLowerCase();
-  const streams = [`${id}@aggTrade`, `${id}@depth@100ms`, `${id}@forceOrder`].join("/");
-  return `${FSTREAM_ORIGIN}?streams=${streams}`;
+  return `${MARKET_STREAM_ORIGIN}?streams=${id}@aggTrade/${id}@forceOrder`;
 }
 
 export async function fetchMarketJson(url: string, parent: AbortSignal): Promise<unknown> {
@@ -90,6 +99,13 @@ export function unwrapStream(payload: unknown): unknown {
   return payload;
 }
 
+/** WebKit may hand a text frame over as a Blob. Both forms are real socket payloads. */
+export async function decodeSocketData(raw: unknown): Promise<unknown> {
+  if (typeof raw === "string") return JSON.parse(raw) as unknown;
+  if (typeof Blob !== "undefined" && raw instanceof Blob) return JSON.parse(await raw.text()) as unknown;
+  return raw;
+}
+
 export function parseDepthDiff(data: unknown): DepthDiff | null {
   if (!data || typeof data !== "object") return null;
   const row = data as { e?: unknown; U?: unknown; u?: unknown; pu?: unknown; b?: unknown; a?: unknown };
@@ -102,6 +118,24 @@ export function parseDepthDiff(data: unknown): DepthDiff | null {
   const asks = asLevels(row.a);
   if (!bids || !asks) return null;
   return { U, u, pu, bids, asks };
+}
+
+export type RoutedMessage =
+  | { kind: "aggTrade"; trade: AggTrade }
+  | { kind: "depth"; diff: DepthDiff }
+  | { kind: "liquidation"; liquidation: Liquidation }
+  | { kind: "ignore" };
+
+/** One message is one channel. A depth frame never has to succeed before a trade frame. */
+export function routeStreamMessage(payload: unknown, symbol: string): RoutedMessage {
+  const data = unwrapStream(payload);
+  const trade = parseAggTrade(data);
+  if (trade && trade.symbol === symbol) return { kind: "aggTrade", trade };
+  const liquidation = parseForceOrder(data, symbol);
+  if (liquidation) return { kind: "liquidation", liquidation };
+  const diff = parseDepthDiff(data);
+  if (diff) return { kind: "depth", diff };
+  return { kind: "ignore" };
 }
 
 function asLevels(value: unknown): Array<[string, string]> | null {
