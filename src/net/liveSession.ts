@@ -30,6 +30,7 @@ export class LiveSession {
   private abort: AbortController | null = null;
   private lastMessageAt = 0;
   private hiddenAt = 0;
+  private uncoveredFrom: number | null = null;
   private snapshotTimer = 0;
   private staleTimer = 0;
   private heatTimer = 0;
@@ -146,6 +147,10 @@ export class LiveSession {
       if (bindId !== this.bindId || !this.alive(generation)) return;
       this.attempt = 0;
       if (this.store.sessionStartedAt === null) this.store.sessionStartedAt = Date.now();
+      if (this.uncoveredFrom !== null) {
+        this.store.footprint.noteGap(this.uncoveredFrom, Date.now());
+        this.uncoveredFrom = null;
+      }
       this.lastMessageAt = Date.now();
       this.store.book.reconnect();
       this.armTimers(generation);
@@ -167,6 +172,7 @@ export class LiveSession {
     socket.onclose = () => {
       if (bindId !== this.bindId || !this.alive(generation)) return;
       this.store.book.reconnect();
+      if (this.uncoveredFrom === null) this.uncoveredFrom = this.lastMessageAt || Date.now();
       window.clearInterval(this.heatTimer);
       this.scheduleReconnect(generation);
       this.onChange();
@@ -267,7 +273,7 @@ export class LiveSession {
     this.write(
       "warn",
       "連線中斷",
-      `與 fstream.binance.com 的連線已中斷，${Math.round(delay / 1000)} 秒後重試（第 ${this.attempt} 次）。中斷期間的逐筆與掛單無法補回。`,
+      `與 fstream.binance.com 的連線已中斷，${Math.round(delay / 1000)} 秒後重試（第 ${this.attempt} 次）。中斷期間的逐筆沒有收到，CVD 不會用 0 補洞，也不會重新從零起算。`,
     );
     window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = window.setTimeout(() => this.openSocket(generation), delay);
@@ -360,11 +366,13 @@ export class LiveSession {
       return;
     }
     if (!this.hiddenAt || this.stopped || this.store.mode !== "live") return;
-    const away = Date.now() - this.hiddenAt;
+    const started = this.hiddenAt;
+    const away = Date.now() - started;
     this.hiddenAt = 0;
     if (away < 8_000 || this.socket?.readyState !== WebSocket.OPEN) return;
     this.store.continuityWarning =
-      "分頁在背景時，瀏覽器可能暫停連線。這段時間漏掉的逐筆與掛單無法補回，訂單簿會重新對齊。";
+      "分頁在背景時可能漏掉逐筆。CVD 只累計實際收到的成交，不會把缺口補成 0，也不會重新從零起算。";
+    this.store.footprint.noteGap(started, Date.now());
     this.store.book.reconnect();
     void this.pullSnapshot(this.generation);
     this.onChange();

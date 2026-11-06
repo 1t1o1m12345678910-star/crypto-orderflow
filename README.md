@@ -18,7 +18,8 @@ The default view tries the live feed. **示範** switches to a clearly labeled s
 
 ## What the chart is
 
-- **Footprint.** Each cell is aggressive buy and sell volume at that price inside the bar. Binance `aggTrade.m === true` means the buyer is the maker, so the print is an aggressive sell. Delta is buy minus sell.
+- **Footprint.** Each cell is aggressive buy and sell volume at that price inside the bar. The left column is aggressive sell (trade into the bid). The right column is aggressive buy (trade into the ask). Binance `aggTrade.m === true` means the buyer is the maker, so the print is an aggressive sell. Delta for a bar is aggressive buy minus aggressive sell.
+- **CVD.** The line is the running sum of those deltas from the first trade this page actually received in the current symbol and mode. It is not open interest. Pan, zoom, and 重設畫面 do not move that zero. Changing symbol or switching between live and demo starts a new sum. A disconnect is marked as a gap: missing trades are not filled in and the sum is not reset. Dropped old bars stay inside the sum as a prefix, so the line does not jump back to zero.
 - **Candles.** `GET /fapi/v1/klines` is exchange OHLC plus total volume only. Those bars are hollow and gray. They are not footprint history and they are not depth history.
 - **Heatmap.** After the local book is synced, the page stores about one snapshot per second for roughly seven minutes, keeping the levels nearest the mid. There is no public historical depth feed, so the heatmap cannot be warmed up from the past.
 - **Liquidations.** `@forceOrder` is incomplete. Since 14 April 2026 Binance documents it as the **largest** liquidation in each 1000ms window per symbol, not every liquidation and not merely the latest. Quantity is the base asset (BTC or ETH). Price is USDT. `SELL` liquidates a long; `BUY` liquidates a short.

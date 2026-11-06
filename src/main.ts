@@ -16,6 +16,7 @@ const layers: ChartLayers = {
   liquidations: true,
   volume: true,
   candles: true,
+  cvd: true,
 };
 const view = {
   span: 32 * 60_000,
@@ -56,13 +57,14 @@ app.innerHTML = `
         <button type="button" data-layer="heatmap" aria-pressed="true">熱圖</button>
         <button type="button" data-layer="liquidations" aria-pressed="true">清算</button>
         <button type="button" data-layer="volume" aria-pressed="true">量能</button>
+        <button type="button" data-layer="cvd" aria-pressed="true">CVD</button>
         <button type="button" data-layer="candles" aria-pressed="true">K 線</button>
       </div>
       <div class="zoom" role="group" aria-label="縮放">
         <button type="button" id="zoom-out" aria-label="縮小">−</button>
         <button type="button" id="zoom-in" aria-label="放大">＋</button>
       </div>
-      <button type="button" class="ghost" id="reset">重設</button>
+      <button type="button" class="ghost" id="reset">重設畫面</button>
       <button type="button" class="ghost" id="follow" aria-pressed="true">跟隨</button>
       <button type="button" class="ghost" id="live" aria-pressed="true">即時</button>
       <button type="button" class="ghost demo" id="demo" aria-pressed="false">示範</button>
@@ -77,18 +79,22 @@ app.innerHTML = `
     <div><span>最新價 USDT</span><b id="hud-price">—</b></div>
     <div><span>買一 / 賣一</span><b id="hud-bbo">—</b></div>
     <div><span>當根 Delta</span><b id="hud-delta">—</b></div>
+    <div><span id="hud-cvd-label">CVD 累計</span><b id="hud-cvd">—</b></div>
     <div><span>已觀察逐筆</span><b id="hud-trades">0</b></div>
     <div><span>清算筆數（不完整）</span><b id="hud-liq">0</b></div>
     <div><span id="hud-unit-label">數量單位</span><b id="hud-unit">BTC</b></div>
   </section>
+  <p class="cvd-note" id="cvd-note"></p>
   <div class="chart-wrap" id="chart-wrap">
-    <canvas id="chart" aria-label="訂單流圖：足跡、掛單熱圖、清算與成交量"></canvas>
+    <canvas id="chart" aria-label="訂單流圖：足跡、CVD、掛單熱圖、清算與成交量"></canvas>
     <div class="banner" id="banner"></div>
     <div class="tip" id="tip" hidden></div>
   </div>
   <div class="legend" aria-label="圖例">
-    <span><i class="swatch buy"></i>主動買、買單掛量</span>
-    <span><i class="swatch sell"></i>主動賣、賣單掛量</span>
+    <span><i class="swatch sell"></i>足跡左欄：主動賣（打到 Bid）</span>
+    <span><i class="swatch buy"></i>足跡右欄：主動買（打到 Ask）</span>
+    <span><i class="swatch buy"></i>熱圖藍：可撤買單</span>
+    <span><i class="swatch sell"></i>熱圖橙：可撤賣單</span>
     <span><i class="swatch history"></i>空心灰蠟燭：交易所 K 線，無足跡</span>
     <span><i class="tri down"></i>多單強平（SELL）</span>
     <span><i class="tri up"></i>空單強平（BUY）</span>
@@ -98,11 +104,13 @@ app.innerHTML = `
     <summary>怎麼讀這張圖</summary>
     <article>
       <h2>足跡</h2>
-      <p>每一格是該價位、在這根 K 的時間內，主動買進與主動賣出的成交量。主動方是吃單的人。幣安 aggTrade 的 m 為 true，代表買方是掛單者，所以這筆算主動賣出；m 為 false 則是主動買進。格子左段是主動買（藍），右段是主動賣（橙）。空間夠的時候會寫出兩邊的數量。縮小到格子太扁時，相鄰價位會合併成一列，數字是該價格帶的合計；放大後回到最小跳動。兩者相減是 Delta：正值表示主動買比較多。這是成交統計，不是預測。</p>
+      <p>每一格是該價位已經成交的量。幣安 aggTrade 的 m 為 true 代表買方是掛單者，所以這筆是主動賣出；m 為 false 是主動買進。左欄是主動賣，也就是打到買方掛單（Bid）；右欄是主動買，也就是打到賣方掛單（Ask）。格子太扁時，相鄰價位會合併，數字是該價格帶的合計。</p>
+      <h2>Delta 與 CVD</h2>
+      <p>Delta 是這一根裡的主動買減主動賣。正值是主動買比較多，負值是主動賣比較多。CVD 是從本頁這一輪第一筆實際收到的成交開始，把 Delta 一路加總，再連成線，用來和同一時間的價格對照。它不是未平倉量（OI），也不能單靠正負確認誰是主力，或價格一定接著漲跌。縮放、平移和「重設」只動畫面，不改這個起點。換合約，或在即時與示範之間切換，才會另起一條從零開始的累計。斷線或背景漏掉的成交不會補進 CVD，也不會把缺口當成 0 或把曲線歸零。歷史 K 線沒有逐筆，不會拿來編 CVD。</p>
       <h2>K 線不是足跡</h2>
       <p>左側空心灰蠟燭來自 REST /fapi/v1/klines，只有開高低收和總成交量。它沒有每個價位的主動買賣，也沒有當時的掛單，不能當成足跡或熱圖歷史。連線之後新收到的逐筆，才會畫進足跡。1 分、5 分、15 分的邊界對齊 Unix 時間，與幣安 K 線相同；座標上的鐘點換算成你的本機時區。</p>
       <h2>掛單熱圖</h2>
-      <p>熱圖是訂單簿同步成功之後，大約每秒拍一次的掛單量。藍是買單，橙是賣單。公開 API 沒有掛單歷史，剛連上時左側不會有熱圖，也不會用 K 線暖機冒充。為了控制記憶體，只保留約 7 分鐘、靠近中間價的檔位。數量變成 0 的價位會從訂單簿刪除。</p>
+      <p>熱圖是訂單簿同步之後大約每秒拍一次、還掛在簿上的量。那些單可以撤掉，不是成交。藍是買單，橙是賣單。公開 API 沒有掛單歷史，剛連上時左側不會有熱圖，也不會用 K 線冒充。為了控制記憶體，只保留約 7 分鐘、靠近中間價的檔位。</p>
       <h2>合約深度，不是現貨</h2>
       <p>連線後先緩衝 depth@100ms，再抓 /fapi/v1/depth 快照。第一筆要蓋到快照的 lastUpdateId（U ≤ lastUpdateId ≤ u），或是 pu 剛好接上。之後每一筆的 pu 必須等於上一筆的 u，否則整本訂單簿作廢並重抓。現貨那套 lastUpdateId+1 在 U 本位合約上會把正常的序號跳動誤判成缺口。</p>
       <h2>清算不完整</h2>
@@ -110,7 +118,7 @@ app.innerHTML = `
       <h2>成交量</h2>
       <p>有足跡的柱子分成主動買與主動賣。只有交易所 K 線的柱子是灰色總量，沒有方向。不要把灰色總量讀成主動單。數量單位是基礎資產：BTCUSDT 為 BTC，ETHUSDT 為 ETH。價格是 USDT。</p>
       <h2>操作</h2>
-      <p>拖曳平移，雙指或滾輪縮放，雙擊圖面或按「重設」回到最新並恢復價格範圍。也可以按＋ − 縮放、左右方向鍵平移、F 切換跟隨。Shift＋滾輪只縮放價格。手機上圖面的手勢不會帶動整頁捲動，說明文字在圖的下方。</p>
+      <p>拖曳平移，雙指或滾輪縮放，雙擊圖面或按「重設畫面」回到最新並恢復價格範圍。這不會把 CVD 歸零。也可以按＋ − 縮放、左右方向鍵平移、F 切換跟隨。Shift＋滾輪只縮放價格。手機上圖面的手勢不會帶動整頁捲動，說明文字在圖的下方。</p>
     </article>
   </details>
   <footer>
@@ -161,6 +169,7 @@ function model(): ChartModel {
     priceShift: view.priceShift,
     candles: store.candles,
     bars: store.footprint.bars(store.timeframe),
+    cvd: store.footprint.cvdSeries(store.timeframe),
     heat: store.heatmap.columns,
     liquidations: store.liquidations,
     layers,
@@ -233,7 +242,7 @@ function bannerText(): string {
   if (store.sessionStartedAt === null) {
     return `尚未開始累積逐筆。若出現空心蠟燭，那只是交易所 K 線，沒有足跡與熱圖。${warning}`;
   }
-  return `直的淡金線是這次連線的起點。左側空心蠟燭沒有逐筆；熱圖與足跡從連線後才有，無法回補更早的掛單。${warning}`;
+  return `直的淡金線是這次連線的起點。CVD 從本頁第一筆成交累計，重設畫面不會歸零。左側空心蠟燭沒有逐筆。${warning}`;
 }
 
 function paintChrome(now: number): void {
@@ -270,6 +279,23 @@ function paintChrome(now: number): void {
     delta.textContent = current ? formatDelta(barDelta(current)) : "—";
     delta.className = !current ? "" : barDelta(current) >= 0 ? "buy" : "sell";
   }
+  const cvdSeries = store.footprint.cvdSeries(store.timeframe);
+  const cvdValue = document.querySelector<HTMLElement>("#hud-cvd");
+  const cvdLabel = document.querySelector<HTMLElement>("#hud-cvd-label");
+  const cvdNote = document.querySelector<HTMLElement>("#cvd-note");
+  if (cvdValue) {
+    cvdValue.textContent = cvdSeries.firstTradeTime === null ? "—" : formatDelta(cvdSeries.total);
+    cvdValue.className = cvdSeries.total > 0 ? "buy" : cvdSeries.total < 0 ? "sell" : "";
+  }
+  if (cvdLabel) cvdLabel.textContent = `CVD（${BASE_ASSET[store.symbol]}）`;
+  if (cvdNote) {
+    const start = cvdSeries.firstTradeTime === null ? "還沒有成交" : formatClock(cvdSeries.firstTradeTime, true);
+    const mode = store.mode === "demo" ? "示範" : "即時";
+    const hole = cvdSeries.gaps.length
+      ? `已標 ${cvdSeries.gaps.length} 段缺口：漏掉的成交沒有補上，累計也沒有歸零。`
+      : "縮放、平移、重設畫面都不改起點。";
+    cvdNote.textContent = `${mode} ${store.symbol} 的 CVD 從 ${start} 這筆收到的成交起算，單位是 ${BASE_ASSET[store.symbol]}。換幣或切換示範／即時才重新從零累計。${hole}`;
+  }
   if (trades) trades.textContent = store.tradesSeen.toLocaleString("zh-Hant");
   if (liq) liq.textContent = String(store.liquidations.length);
   if (unit) unit.textContent = BASE_ASSET[store.symbol];
@@ -292,7 +318,11 @@ function placeTip(): void {
   ];
   if (info.bar) {
     lines.push(`主動買 <b class="buy">${formatQty(info.bar.buy)}</b> · 主動賣 <b class="sell">${formatQty(info.bar.sell)}</b>`);
-    lines.push(`Delta <b>${formatDelta(barDelta(info.bar))}</b> ${BASE_ASSET[store.symbol]}`);
+    lines.push(`本根 Delta <b>${formatDelta(info.delta ?? barDelta(info.bar))}</b> ${BASE_ASSET[store.symbol]}`);
+    if (info.cvd !== null) {
+      lines.push(`CVD <b>${formatDelta(info.cvd)}</b> ${BASE_ASSET[store.symbol]}（自本輪第一筆，不是畫面左緣）`);
+    }
+    if (info.cvdGap) lines.push("這段有連線缺口，中間沒收到的成交沒有計入。");
     if (info.kind === "partial") lines.push("這根 K 在連線前就已開始，足跡只含連線後的逐筆。");
   } else if (info.candle && (info.kind === "history" || info.kind === "partial")) {
     lines.push(`交易所總量 <b>${formatQty(info.candle.volume)}</b> ${BASE_ASSET[store.symbol]}，沒有主動方向`);

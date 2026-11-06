@@ -1,4 +1,5 @@
 import { aggressorFromBuyerMaker, type AggTrade } from "./aggressor";
+import { SessionCvd, type CvdSnapshot } from "./cvd";
 import { priceToTick, tickToPrice } from "./price";
 import { bucketStart, type Timeframe, TIMEFRAMES } from "./time";
 
@@ -26,11 +27,33 @@ export class FootprintBook {
     "5m": new Map(),
     "15m": new Map(),
   };
+  private readonly cvdBook: Record<Timeframe, SessionCvd>;
 
-  constructor(readonly tickSize: number) {}
+  constructor(
+    readonly tickSize: number,
+    private readonly maxBars = MAX_BARS,
+  ) {
+    this.cvdBook = {
+      "1m": new SessionCvd("1m", maxBars),
+      "5m": new SessionCvd("5m", maxBars),
+      "15m": new SessionCvd("15m", maxBars),
+    };
+  }
 
   addTrade(trade: AggTrade): void {
-    for (const timeframe of TIMEFRAMES) this.addTo(timeframe, trade);
+    for (const timeframe of TIMEFRAMES) {
+      this.addTo(timeframe, trade);
+      this.cvdBook[timeframe].add(trade.time, trade.buyerIsMaker, trade.qty);
+    }
+  }
+
+  /** A disconnect hole. CVD is not restarted and the missing prints are not invented. */
+  noteGap(from: number, to: number): void {
+    for (const timeframe of TIMEFRAMES) this.cvdBook[timeframe].noteGap(from, to);
+  }
+
+  cvdSeries(timeframe: Timeframe): CvdSnapshot {
+    return this.cvdBook[timeframe].snapshot();
   }
 
   bar(openTime: number, timeframe: Timeframe): FootprintBar | undefined {
@@ -48,7 +71,7 @@ export class FootprintBook {
     const price = tickToPrice(tick, this.tickSize);
     let bar = book.get(openTime);
     if (!bar) {
-      if (book.size >= MAX_BARS) this.dropOldest(book);
+      if (book.size >= this.maxBars) this.dropOldest(book);
       bar = {
         openTime,
         open: price,
