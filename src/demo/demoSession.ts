@@ -24,13 +24,13 @@ export class DemoSession {
     this.price = bitcoin ? 96_420.4 : 3_521.42;
     this.random = mulberry32(bitcoin ? 20261106 : 771324);
     const now = Date.now();
-    this.store.sessionStartedAt = now - 48 * 60_000;
+    this.store.sessionStartedAt = now - 360 * 60_000;
     this.seed(now);
     this.store.statusKind = "demo";
     this.store.statusText = "示範模式";
     this.store.detail =
       "圖上的成交、掛單與清算都是這台瀏覽器裡的合成資料，不是幣安行情，也不能用來下單。要看真行情請按「即時」。";
-    this.tradeTimer = window.setInterval(() => this.step(), 360);
+    this.tradeTimer = window.setInterval(() => this.step(), 800);
     this.heatTimer = window.setInterval(() => this.sampleHeat(), 1_000);
     this.onChange();
   }
@@ -42,7 +42,7 @@ export class DemoSession {
   }
 
   private seed(now: number): void {
-    for (let minute = 48; minute >= 1; minute--) this.emitTrades(now - minute * 60_000, 60_000, 16);
+    for (let minute = 360; minute >= 1; minute--) this.emitTrades(now - minute * 60_000, 60_000, 8);
     for (let second = 360; second >= 0; second--) {
       this.price += (this.random() - 0.5) * this.store.tickSize * 2;
       this.publishBook(now - second * 1_000);

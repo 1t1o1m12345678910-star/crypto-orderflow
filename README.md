@@ -45,7 +45,7 @@ USD-M depth sync follows the futures rules, not the spot rules:
 6. Quantities are absolute. Zero deletes a level. Deleting a missing level is normal.
 7. Events with `u` at or before the applied id are duplicates or stale and are ignored. A reconnect clears the book so old ids cannot be applied to the new socket.
 
-If Binance returns HTTP 451 or a restricted-location response, the page says so and stops. It does not invent a live tape and it does not offer a proxy.
+If Binance returns HTTP 451, or a restricted-location body the browser is allowed to read, the page says the network cannot use Binance and stops. On many restricted networks the 451 response has no CORS header, so the browser only reports a failed fetch. The banner explains that case too. The page does not invent a live tape and it does not offer a proxy.
 
 ## Tests
 

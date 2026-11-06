@@ -322,13 +322,13 @@ export class ChartRenderer {
       ctx.fillStyle = long ? "#ffd166" : "#d2b4ff";
       ctx.beginPath();
       if (long) {
-        ctx.moveTo(x, y + 7);
-        ctx.lineTo(x - 6, y - 5);
-        ctx.lineTo(x + 6, y - 5);
+        ctx.moveTo(x, y + 9);
+        ctx.lineTo(x - 8, y - 6);
+        ctx.lineTo(x + 8, y - 6);
       } else {
-        ctx.moveTo(x, y - 7);
-        ctx.lineTo(x - 6, y + 5);
-        ctx.lineTo(x + 6, y + 5);
+        ctx.moveTo(x, y - 9);
+        ctx.lineTo(x - 8, y + 6);
+        ctx.lineTo(x + 8, y + 6);
       }
       ctx.closePath();
       ctx.fill();

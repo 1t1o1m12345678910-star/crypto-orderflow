@@ -18,7 +18,7 @@ export interface FootprintBar {
   levels: Map<number, FootprintCell>;
 }
 
-const MAX_BARS = 240;
+const MAX_BARS = 520;
 
 export class FootprintBook {
   private readonly series: Record<Timeframe, Map<number, FootprintBar>> = {

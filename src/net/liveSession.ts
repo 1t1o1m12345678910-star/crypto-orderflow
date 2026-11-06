@@ -327,7 +327,7 @@ export class LiveSession {
       this.write(
         "bad",
         "連不到幣安",
-        "瀏覽器連不到 fapi.binance.com 或 fstream.binance.com。可能是斷線、防火牆，或所在地無法使用幣安。本工具不會改走代理。可以按「再試一次」，或開「示範模式」看介面。",
+        "瀏覽器無法讀取 fapi.binance.com 或 fstream.binance.com。受限地區常見的情況是幣安回 HTTP 451，但錯誤頁沒有 CORS 標頭，所以網頁只看得到連線失敗，讀不到狀態碼。也可能是斷線或防火牆。本工具不會改走代理。可以按「再試一次」，或開「示範模式」。示範是合成資料，不是真行情。",
       );
       return;
     }
